@@ -1,0 +1,413 @@
+using Microsoft.Practices.Unity;
+using P2M;
+using P2M.Directories;
+using P2M.objects;
+using P2M.Security;
+using Resources;
+using SL.Utils;
+using smcorelib.Services.Directories;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using smcorelib.Services.objects;
+using P2M.Models.Directories;
+using smcorelib.Services.LongActions;
+using P2M.Documents;
+
+namespace smcorelib.P2M.objects.objectTemplates
+{
+	public class ObjectCopyService : IObjectCopyService
+	{
+		private readonly IUnityContainer container;
+
+		private readonly Lazy<IcatalogRecordValueService> catalogRecordValueService;
+
+		private readonly Lazy<IcatalogRecordService> catalogRecordService;
+
+		private readonly Lazy<IFieldService> fieldService;
+
+		private readonly Lazy<IcatalogFieldService> catalogFieldService;
+
+		private readonly Lazy<IobjectTypesService> objectTypesService;
+
+		private readonly Lazy<ISecurityService> securityService;
+
+		private readonly Lazy<ILongActionsService> longActionsService;
+
+		public ObjectCopyService(
+			Lazy<IcatalogRecordService> catalogRecordService,
+			Lazy<IcatalogRecordValueService> catalogRecordValueService,
+			Lazy<IFieldService> fieldService,
+			Lazy<IcatalogFieldService> catalogFieldService,
+			Lazy<IobjectTypesService> objectTypesService,
+			Lazy<ISecurityService> securityService,
+			Lazy<ILongActionsService> longActionsService,
+			IUnityContainer container)
+		{
+			this.catalogRecordService = catalogRecordService;
+			this.catalogRecordValueService = catalogRecordValueService;
+			this.fieldService = fieldService;
+			this.catalogFieldService = catalogFieldService;
+			this.objectTypesService = objectTypesService;
+			this.securityService = securityService;
+			this.longActionsService = longActionsService;
+			this.container = container;
+		}
+
+		public void CopyOneobject(Guid originalobjectId, Guid newobjectParentId, Guid responsibleId,
+			Guid ownerId,
+			bool isDelegateResponsible,
+			bool isDelegateOwner,
+			bool isResetPlanDates,
+			Action<Guid, ILongActionsService> afterCopyobject)
+		{
+			var objectCopyActionsContainerList = new List<CopyobjectsActionsContainer>();
+
+			Func<object, string> nameSelector = p => p.Name;
+
+			var objectCopyContext = container.Resolve<objectCopyContext>();
+
+			objectCopyContext.objectsManager = objectsManager.Get();
+			objectCopyContext.OriginalobjectId = originalobjectId;
+			objectCopyContext.NewobjectParentId = newobjectParentId;
+			objectCopyContext.ResponsibleId = responsibleId;
+			objectCopyContext.OwnerId = ownerId;
+			objectCopyContext.IsCopyTree = true;
+			objectCopyContext.IsCopyContent = false;
+			objectCopyContext.IsThrowExceptionOnCheckIdentical = false;
+			objectCopyContext.NameSelector = nameSelector;
+			objectCopyContext.IsDelegateResponsible = isDelegateResponsible;
+			objectCopyContext.IsDelegateOwner = isDelegateOwner;
+			objectCopyContext.IsResetPlanDates = isResetPlanDates;
+
+			var newobjectId = Copyobject(objectCopyContext, objectCopyActionsContainerList, afterCopyobject);
+
+			foreach (var objectCopyActionsContainer in objectCopyActionsContainerList)
+			{
+				objectCopyActionsContainer.AfterSaveobjects();
+			}
+		}
+
+		public void CopyManyobjects(Guid originalobjectId, IEnumerable<Guid> newobjectParentIds, Guid? responsibleId,
+			Guid? ownerId,
+			bool isDelegateResponsible,
+			bool isDelegateOwner,
+			bool isResetPlanDates,
+			Action<Guid, ILongActionsService> afterCopyobject)
+		{
+			var objectsManager = objectsManager.Get();
+			var objectCopyActionsContainerList = new List<CopyobjectsActionsContainer>();
+
+			Func<object, string> nameSelector = p =>
+					$"{objectTypesService.Value.GetobjectType(p.objectTypeId).Name}_{objectsManager.GetobjectOrTemplate(p.ParentobjectId).Name}";
+
+			foreach (var newobjectParentId in newobjectParentIds)
+			{
+				var newobjectParent = objectsManager.GetobjectOrTemplate(newobjectParentId.ToString());
+
+				var objectCopyContext = container.Resolve<objectCopyContext>();
+
+				objectCopyContext.objectsManager = objectsManager;
+				objectCopyContext.OriginalobjectId = originalobjectId;
+				objectCopyContext.NewobjectParentId = newobjectParentId;
+				objectCopyContext.ResponsibleId = responsibleId == null ? new Guid(newobjectParent.ResponsiblePersonId) : responsibleId.Value;
+				objectCopyContext.OwnerId = ownerId == null ? new Guid(newobjectParent.OwnerId) : ownerId.Value;
+				objectCopyContext.IsCopyTree = false;
+				objectCopyContext.IsCopyContent = false;
+				objectCopyContext.IsThrowExceptionOnCheckIdentical = true;
+				objectCopyContext.NameSelector = nameSelector;
+				objectCopyContext.IsDelegateResponsible = isDelegateResponsible;
+				objectCopyContext.IsDelegateOwner = isDelegateOwner;
+				objectCopyContext.IsResetPlanDates = isResetPlanDates;
+
+				var newobjectId = Copyobject(objectCopyContext, objectCopyActionsContainerList, afterCopyobject);
+			}
+
+			foreach (var objectCopyActionsContainer in objectCopyActionsContainerList)
+			{
+				objectCopyActionsContainer.AfterSaveobjects();
+			}
+		}
+
+		protected Guid Copyobject(objectCopyContext objectCopyContext, List<CopyobjectsActionsContainer> objectCopyActionsContainerList, Action<Guid, ILongActionsService> afterCopyobject = null)
+		{
+			var originalobject =
+				objectCopyContext.objectsManager.GetobjectOrTemplate(objectCopyContext.OriginalobjectId.ToString());
+			var originalobjectData =
+				objectCopyContext.ServicesContainer.objectDataService.GetobjectDataByobject(objectCopyContext.OriginalobjectId);
+
+			var objectResult = objectCopyContext.objectTemplatesCopyService.CreateFromTemplate(
+				originalobject,
+				originalobjectData,
+				objectCopyContext.IsResetPlanDates,
+				false,
+				true);
+
+			var object = objectResult.object;
+			var objectData = objectResult.objectData;
+
+			var objectCopyActionsContainer = new CopyobjectsActionsContainer(objectCopyContext);
+
+			objectCopyActionsContainer.SaveobjectContext.CurrentPerson = objectCopyContext.ServicesContainer.PersonService.CurrentPerson();
+
+			object.Status = objectStatuses.DEFAULT;
+			object.SetNull(objectFields.ActualStartDate);
+
+			object.ParentobjectId = objectCopyContext.NewobjectParentId.ToString();
+			object.Name = objectCopyContext.NameSelector(object);
+
+			object.DelegatedOwnerId = null;
+			object.DelegatedResponsiblePersonId = null;
+
+			objectCopyActionsContainer.BeforeSaveParentobject =
+				(object1) =>
+				{
+					object1.ParentobjectId = objectCopyContext.NewobjectParentId.ToString();
+				};
+
+			objectCopyActionsContainer.BeforeSaveChildobject =
+				(object1) =>
+				{
+					if (objectTypesService.Value.GetobjectType(object1.objectTypeId).CheckIdentical)
+					{
+						object1.Name += SL_Web_objects.objectCopyPostfix;
+					}
+
+					object1.Status = objectStatuses.DEFAULT;
+					object1.SetNull(objectFields.ActualStartDate);
+				};
+
+			var objectType = objectTypesService.Value.GetobjectType(object.objectTypeId);
+
+			if (objectCopyContext.IsThrowExceptionOnCheckIdentical && objectType.CheckIdentical)
+			{
+				var list =
+					objectCopyContext.objectsManager
+						.GetList()
+						.SelectAuto(
+							objectFields.objectTypeId, objectType.Code,
+							objectFields.Name, object.Name);
+
+				if (list.Length > 0)
+				{
+					throw new LogicErrorWithLinkException(SL_Web_objects.ObjectWithThisNameIsAlreadyExistInSystem + " ",
+						list[0], objectType.Icon);
+				}
+			}
+
+			afterCopyobject?.Invoke(object.Id, longActionsService.Value);
+
+			P2MList childs = objectsManager.Newlist(typeof(object));
+
+			if (objectCopyContext.IsCopyTree)
+			{
+				object.Name += SL_Web_objects.objectCopyPostfix;
+
+				objectCopyContext.objectTemplatesCopyService.CreateobjectsFromTemplate(
+					objectCopyContext.OriginalobjectId.ToString(),
+					object,
+					objectData,
+					objectCopyContext.IsResetPlanDates,
+					true,
+					objectCopyContext.objectsManager.GetobjectTreeIDs(objectCopyContext.OriginalobjectId.ToString(), false)
+						.Select(q => q.ToString())
+						.ToList(),
+					false,
+					false,
+					null,
+					objectCopyContext.IsCopyContent,
+					true,
+					true,
+					true,
+					afterCopyobject,
+					objectCopyActionsContainer);
+			}
+			else
+			{
+				object.ParentobjectId = objectCopyContext.NewobjectParentId.ToString();
+
+				objectCopyActionsContainer.objectActionsList.Add(
+					(pm1, pram1, isCalculatePercent) =>
+					{
+						pm1.Saveobject(object, objectData, isCalculatePercent: isCalculatePercent);
+
+						afterCopyobject?.Invoke(object.Id, longActionsService.Value);
+					});
+			}
+			childs = objectCopyActionsContainer.Saveobjects();
+
+			AddInheritedFields(object, objectCopyContext.objectsManager, objectCopyActionsContainer);
+
+			foreach (object childobject in childs)
+			{
+				AddInheritedFields(childobject, objectCopyContext.objectsManager, objectCopyActionsContainer);
+				afterCopyobject?.Invoke(childobject.Id, longActionsService.Value);
+			}
+
+			bool haveChildobjects = childs.Count > 0;
+
+			if (objectCopyContext.IsDelegateResponsible)
+			{
+				var responsiblePerson = securityService.Value.AuthorizeMe(object.UID, objectOperations.EDIT_LEADER)
+					? objectCopyContext.ServicesContainer.PersonService.GetOrDefault(objectCopyContext.ResponsibleId)
+					: objectCopyContext.ServicesContainer.PersonService.CurrentPerson();
+
+				objectCopyActionsContainer.objectsDelegateActionsList.Add(q => q.DelegateobjectResponsible(
+					object,
+					responsiblePerson,
+					haveChildobjects ? RecursiveAction.Root : RecursiveAction.None,
+					haveChildobjects ? childs : null));
+			}
+
+			if (objectCopyContext.IsDelegateOwner)
+			{
+				childs = objectCopyContext.objectsManager.GetobjectTree(object.UID, false);
+				var ownerPerson = securityService.Value.AuthorizeMe(object.UID, objectOperations.EDIT_OWNER)
+					? objectCopyContext.ServicesContainer.PersonService.GetOrDefault(objectCopyContext.OwnerId)
+					: objectCopyContext.ServicesContainer.PersonService.CurrentPerson();
+
+				objectCopyActionsContainer.objectsDelegateActionsList.Add(q => q.DelegateobjectOwner(
+					object,
+					ownerPerson,
+					haveChildobjects ? RecursiveAction.Root : RecursiveAction.None,
+					haveChildobjects ? childs : null));
+			}
+
+			// Решено пересчитывать даты проекта при сбросе плановых дат
+			if (objectCopyContext.IsResetPlanDates && object.ParentobjectId != null)
+			{
+				objectCopyActionsContainer.ParentobjectIdForResetPlanDates = object.ParentobjectId;
+			}
+
+			objectCopyActionsContainer.ParentobjectId = object.ParentobjectId;
+			objectCopyActionsContainerList.Add(objectCopyActionsContainer);
+
+			return object.Id;
+		}
+
+		private void AddInheritedFields(object object, objectsManager objectsManager, CopyobjectsActionsContainer objectCopyActionsContainer)
+		{
+			var inheritedFields = new List<Field>();
+
+			if (object.ParentobjectId == null)
+				return;
+
+			object parent = objectsManager.GetobjectOrTemplate(object.ParentobjectId);
+
+			if (parent == null)
+			{
+				throw new P2MObjectNotFoundException(string.Format("{0}: uid={1}", SL_Web_Directories.objectDoesntExist, object.ParentobjectId));
+			}
+
+			var parentcatalogFields = catalogFieldService.Value.GetcatalogFieldsBycatalog(parent.objectTypeId.ToGuid());
+			parentcatalogFields = parentcatalogFields.Where(c => c.Inherit == true).ToList();
+
+			var catalogFields = catalogFieldService.Value.GetcatalogFieldsBycatalog(object.objectTypeId.ToGuid());			
+			var fields = fieldService.Value.GetBycatalog(object.objectTypeId.ToGuid());
+
+			foreach (var catalogField in parentcatalogFields)
+			{
+				var field = fields.GetById(catalogField.FieldId);
+
+				if (field != null && field.CanInherit)
+				{
+					inheritedFields.Add(field);
+				}
+			}
+
+			InheritValues(
+				object,
+				parent,
+				parentcatalogFields,
+				inheritedFields,
+				catalogFields,
+				objectsManager,
+				objectCopyActionsContainer);
+		}
+
+		private void InheritValues(
+			object object,
+			object parent,
+			List<catalogField> parentcatalogFields,
+			List<Field> inheritedFields,
+			List<catalogField> catalogFields,
+			TransactionManager manager,
+			CopyobjectsActionsContainer objectCopyActionsContainer)
+		{
+			var parentRecord = catalogRecordService.Value.GetSystemcatalogRecord(parent.objectTypeId.ToGuidValueOrDefault(), parent.Id);
+
+			if (parentRecord == null)
+				return;
+
+			var values = catalogRecordValueService.Value.GetcatalogRecordValues(parentRecord.Id);
+
+			var isCreatedcatalogRecord = false;
+			catalogRecord objectcatalogRecord = null;
+
+			foreach (var catalogField in parentcatalogFields)
+			{
+				if (inheritedFields.Any(f => f.Id == catalogField.FieldId))
+				{
+					if (!isCreatedcatalogRecord)
+					{
+						var objectsManager = objectsManager.Get();
+						objectcatalogRecord = catalogRecordService.Value.GetOrCreateobjectRecord(object.objectTypeId.ToGuid(), object.Id);
+						objectCopyActionsContainer.catalogRecordCopyobjectsActionsList.Add(q => q.Save(objectcatalogRecord, objectCopyActionsContainer.SavecatalogRecordContext));
+						isCreatedcatalogRecord = true;
+					}
+
+					var field = inheritedFields.GetById(catalogField.FieldId);
+
+					SetcatalogRecordValues(
+						objectcatalogRecord,
+						catalogFields,
+						manager,
+						field,
+						values.Where(q => q.catalogFieldId == catalogField.Id).ToList(),
+						objectCopyActionsContainer);
+				}
+			}
+		}
+
+		private void SetcatalogRecordValues(
+			catalogRecord catalogRecord, 
+			List<catalogField> catalogFields,
+			TransactionManager manager, 
+			Field field, 
+			List<catalogRecordValue> values,
+			CopyobjectsActionsContainer objectCopyActionsContainer)
+		{
+			var catalogField = catalogFields.FirstOrDefault(c => c.FieldId == field.Id);
+
+			if ((field.DataType == FieldDataTypeEnum.catalog) &&
+				(field.AllowMultipleValues))
+			{
+				List<string> multiValue = new List<string>();
+
+				foreach (catalogRecordValue catalogRecordValue in values)
+				{
+					var value = catalogRecordValue.GetStringValue();
+					if (value != null)
+						multiValue.Add(value);
+				}
+
+				objectCopyActionsContainer.catalogRecordValueActionsList.Add(q => q.SaveList(catalogRecord.Id, catalogField.Id, field, multiValue));
+			}
+			else
+			{
+				string value = null;
+
+				if (values.Count != 0)
+				{
+					catalogRecordValue catalogRecordValue = values[0];
+
+					var catalogRecordValueStringValue = catalogRecordValue.GetStringValue();
+					if (catalogRecordValueStringValue != null)
+						value = catalogRecordValueStringValue;
+				}
+
+				objectCopyActionsContainer.catalogRecordValueActionsList.Add(q => q.Save(catalogRecord.Id, catalogField.Id, field, value));
+			}
+		}
+	}
+}

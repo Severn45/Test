@@ -1,0 +1,101 @@
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using System;
+using Microsoft.Practices.Unity;
+using P2M.Projects;
+using Moq;
+using P2M.Security;
+using P2M.Models.Projects;
+using smcorelib.Services.Projects;
+using SL.components.Services;
+
+
+namespace Tests.WebServicesTests
+{
+	[TestClass]
+	public class APIPlansTests : A2ntaTests
+	{
+		private Mock<IProjectService> projectServiceMock;
+		private Mock<ISecurityService> securityServiceMock;
+
+		private readonly string currentPersonLastName = "Sirname";
+		private readonly string authorLastName = "Name";
+		private ProjectBase secureProject;
+		private APIPlans webService;
+
+		// Нужен чтобы сработал SetupAdminUser
+		private IUnityContainer LocalUnity { get; set; }
+
+		protected override void Start()
+		{
+			LocalUnity = Unity.CreateChildContainer();
+
+			secureProject = new ProjectBase();
+
+			projectServiceMock = new Mock<IProjectService>();
+			projectServiceMock.Setup(s => s.GetOrDefault(secureProject.Id, null))
+				.Returns(secureProject)
+				.Verifiable();
+			projectServiceMock.Setup(s => s.BeginTransactionAndCommit(It.IsAny<P2M.TransactionScope>())).Verifiable();
+
+			LocalUnity.RegisterInstance(projectServiceMock.Object);
+
+			securityServiceMock = new Mock<ISecurityService>();
+			securityServiceMock.Setup(s => s.AuthorizeMe(secureProject.UID, ProjectOperations.VIEW))
+				.Returns(false)
+				.Verifiable();
+
+			LocalUnity.RegisterInstance(securityServiceMock.Object);
+			
+			webService = new APIPlans();
+		}
+
+		[TestMethod]
+		[TestCategory(TestCategory.Unit)]
+		[TestCategory(TestCategory.Required)]
+		public void APIPlans_CreateBasePlan_WithNullProject_ShouldThrowException()
+		{
+			// Arrange
+			SetupAdminUser();
+			Exception exception = null; 
+
+			// Act
+			try
+			{
+				webService.CreateBaselinePlan(string.Empty, null);
+			}
+			catch (Exception ex)
+			{
+				exception = ex;
+			}
+
+			// Assert
+			Assert.IsNotNull(exception);
+			Assert.AreEqual(APIPlans.ProjectNotExistsMessage, exception.Message, "Unexpected exception");
+		}
+
+		[TestMethod]
+		[TestCategory(TestCategory.Unit)]
+		[TestCategory(TestCategory.Required)]
+		public void APIPlans_CreateBasePlan_AuthorizeException()
+		{
+			//Arrange
+			SetupNotAdminUser();
+			Exception exception = null;
+
+			// Act
+			try
+			{
+				webService.CreateBaselinePlan(string.Empty, secureProject.Id.ToString());
+			}
+			catch (Exception ex)
+			{
+				exception = ex;
+			}
+
+			// Assert
+			Assert.IsNotNull(exception);
+			Assert.AreEqual(APICommonMethods.AuthorizationError, exception.Message, "Unexpected exception");
+		}
+	}
+
+}

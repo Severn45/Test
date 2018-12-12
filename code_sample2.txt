@@ -1,0 +1,198 @@
+using System;
+using System.Collections.Generic;
+using P2M;
+
+using Microsoft.Practices.Unity;
+using Resources;
+using smcorelib.Services.Cubes;
+using SL.Utils;
+
+namespace streamline.classes.Controllers.Cubes
+{
+	public class ObjectController : BaseController
+	{
+		protected readonly Lazy<IDimensionService> dimensionService;
+		private readonly IObjectAggregationTypeService ObjectAggregationTypeService;
+		private readonly IObjectService ObjectService;
+
+		public virtual Object Object { get; private set; }
+		public List<ObjectAggregationType> AggregationTypes { get; private set; }
+
+		
+		public List<string> AggregationCodes { get; private set; }
+		public bool CubeHasDate { get; private set; }
+		public string ObjectID => Object?.UID;
+		public string CubeID => Object?.CubeId.ToString();
+
+		private ObjectQueryController queryController;
+		public ObjectQueryController QueryController
+		{
+			get
+			{
+				if (queryController == null)
+				{
+					queryController = Unity.Resolve<ObjectQueryControllerFactoryMethod>().Resolve(this);
+					queryController.Error += childController_Error;
+				}
+
+				return queryController;
+			}
+		}
+
+		private ObjectsFormulaItemsController formulaItemsController;
+		public ObjectsFormulaItemsController FormulaItemsController
+		{
+			get
+			{
+				if (formulaItemsController == null)
+				{
+					formulaItemsController = Unity.Resolve<ObjectsFormulaItemsControllerFactoryMethod>().Resolve(this);
+					formulaItemsController.Error += childController_Error;
+				}
+
+				return formulaItemsController;
+			}
+		}
+
+		private ObjectIndicatorController indicatorController;
+		public ObjectIndicatorController IndicatorController
+		{
+			get
+			{
+				if (indicatorController == null)
+				{
+					indicatorController = Unity.Resolve<ObjectIndicatorControllerFactoryMethod>().Resolve(this);
+					indicatorController.Error += childController_Error;
+				}
+
+				return indicatorController;
+			}
+		}
+
+		private ObjectSummaryController summaryController;
+		public ObjectSummaryController SummaryController
+		{
+			get
+			{
+				if (summaryController == null)
+				{
+					summaryController = Unity.Resolve<ObjectSummaryControllerFactoryMethod>().Resolve(this);
+					summaryController.Error += childController_Error;
+				}
+
+				return summaryController;
+			}
+		}
+
+		private ObjectCellColorsController cellColorsController;
+		public ObjectCellColorsController CellColorsController
+		{
+			get
+			{
+				if (cellColorsController == null)
+				{
+					cellColorsController = Unity.Resolve<ObjectCellColorsControllerFactoryMethod>().Resolve(this);
+					cellColorsController.Error += childController_Error;
+				}
+
+				return cellColorsController;
+			}
+		}
+
+		public ObjectController(
+			Lazy<IDimensionService> dimensionService,
+			IObjectAggregationTypeService ObjectAggregationTypeService,
+			IObjectService ObjectService,
+			IUnityContainer container)
+			: base(container)
+		{
+			this.dimensionService = dimensionService;
+			this.ObjectAggregationTypeService = ObjectAggregationTypeService;
+			this.ObjectService = ObjectService;
+		}
+
+		public override void Initialize(System.Collections.IDictionary Params)
+		{
+			base.Initialize(Params);
+
+			string ObjectId = (string)Params["id"];
+			string cubeId = (string)Params["cubeid"];
+
+			LoadData(ObjectId, cubeId);
+
+			//queryController = new ObjectQueryController(this);
+			//queryController.Error += childController_Error;
+		}
+
+		private void LoadData(string ObjectId, string cubeId)
+		{
+			if (ObjectId == null)
+			{
+				Object = new Object();
+				ObjectId = Object.UID;
+				Object.CubeId = cubeId.ToGuid();
+				Object.SourceType = SourceTypes.Directory;
+
+				DataMode = DataMode.Edit;
+			}
+			else
+			{
+				Object = ObjectService.GetOrDefault(ObjectId.ToGuidValueOrDefault());
+
+				if (Object == null)
+				{
+					throw new Exception(Resources.SL_Web_Cubes.ResumeIndicatorNotFound);
+				}
+
+				cubeId = Object.CubeId.ToString();
+			}
+
+			//Загружаем типы агрегации
+			AggregationCodes = new List<string>();
+
+			if (Object.New)
+			{
+				AggregationTypes = new List<ObjectAggregationType>();
+			}
+			else
+			{
+				AggregationTypes = ObjectAggregationTypeService.GetByObjectId(ObjectId.ToGuid());
+
+				foreach (var aggregationType in AggregationTypes)
+					AggregationCodes.Add(aggregationType.AggregationTypeCode);
+			}
+
+			var dateDimensions = dimensionService.Value.GetDateDimensions(cubeId.ToGuidValueOrDefault());
+			CubeHasDate = (dateDimensions.Count > 0);
+		}
+
+		protected override void OnSave(TransactionManager manager)
+		{
+			try
+			{
+				if (Object.Deleted)
+				{
+					ObjectService.Delete(Object.Id);
+				}
+				else
+				{
+					ObjectService.Save(Object);
+					SaveAggreationTypes();				
+				}
+			}
+			catch (Exception e)
+			{
+				Errors.Add(e);
+			}
+		}
+
+		private void childController_Error(object sender, EventArgs e)
+		{
+			Controller child = (Controller)sender;
+
+			if (child != null)
+			{
+				Errors.AddRange(child.Errors);
+			}
+		}
+}
